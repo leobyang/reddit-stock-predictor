@@ -91,6 +91,61 @@ def scrape_subreddit(name, limit=200):
             if syms:
                 link_post_tickers(cur, post_id, syms)
 
+            scrape_comments_for_post(cur, p, post_id)
+
+
+
+def upsert_comment(cur, c, post_id, author_id, parent_comment_id=None):
+    sql = """
+    INSERT INTO comments (reddit_id, post_id, author_id, body, score, created_utc, parent_comment_id, raw_json)
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+    ON CONFLICT (reddit_id) DO UPDATE SET
+      score = EXCLUDED.score
+    RETURNING id;
+    """
+    created = datetime.fromtimestamp(c.created_utc, tz=timezone.utc)
+    raw = {
+        "id": c.id,
+        "post_id": post_id,
+        "author": str(c.author),
+        "body": c.body,
+        "score": c.score,
+        "created_utc": c.created_utc,
+    }
+    cur.execute(sql, (
+        c.id, post_id, author_id, c.body or "", int(c.score or 0),
+        created, parent_comment_id, json.dumps(raw)
+    ))
+    return cur.fetchone()[0]
+
+
+def scrape_comments_for_post(cur, submission, post_id):
+    """Fetch comments for a submission and store them."""
+    print(f"  Fetching comments for {submission.id} …")
+
+    # Ensure all comments are loaded (avoids 'MoreComments')
+    submission.comments.replace_more(limit=0)
+    comments = submission.comments.list()
+
+    for c in comments:
+        author_name = f"u_{c.author.name}" if getattr(c.author, "name", None) else "u_deleted"
+        author_id = upsert_ref(cur, "authors", "username", author_name)
+        parent_comment_id = None
+        if c.parent_id.startswith("t1_"):
+            parent_comment_id = None  # we’ll skip nested linkage for simplicity
+
+        comment_id = upsert_comment(cur, c, post_id, author_id, parent_comment_id)
+
+        syms = extract_tickers(c.body)
+        if syms:
+            for sym in syms:
+                tid = upsert_ref(cur, "tickers", "symbol", sym)
+                cur.execute("""
+                    INSERT INTO comment_tickers (comment_id, ticker_id)
+                    VALUES (%s, %s) ON CONFLICT DO NOTHING;
+                """, (comment_id, tid))
+
+
 if __name__ == "__main__":
     try:
         for s in TARGET_SUBREDDITS:
