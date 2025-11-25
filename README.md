@@ -1,1 +1,1 @@
-# reddit-stock-predictor
+# Reddit Stock Predictor
